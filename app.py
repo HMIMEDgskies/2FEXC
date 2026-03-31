@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 st.set_page_config(page_title="2FEXC V2", page_icon="₿", layout="wide")
@@ -68,6 +69,51 @@ CRYPTO_UNIVERSE = {
 }
 INTERVAL_MAP = {"15m": "15m", "1h": "60m", "4h": "1h", "1d": "1d"}
 PERIOD_MAP = {"15m": "30d", "1h": "60d", "4h": "180d", "1d": "1y"}
+
+TV_SYMBOL_MAP = {
+    "BTC-USD": "BINANCE:BTCUSDT",
+    "ETH-USD": "BINANCE:ETHUSDT",
+    "SOL-USD": "BINANCE:SOLUSDT",
+    "BNB-USD": "BINANCE:BNBUSDT",
+    "XRP-USD": "BINANCE:XRPUSDT",
+    "DOGE-USD": "BINANCE:DOGEUSDT",
+    "ADA-USD": "BINANCE:ADAUSDT",
+    "AVAX-USD": "BINANCE:AVAXUSDT",
+    "LINK-USD": "BINANCE:LINKUSDT",
+    "MATIC-USD": "BINANCE:POLUSDT",
+}
+TV_INTERVAL_MAP = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+
+
+def render_tradingview_widget(symbol: str, timeframe: str, height: int = 760):
+    tv_symbol = TV_SYMBOL_MAP.get(symbol, "BINANCE:BTCUSDT")
+    tv_interval = TV_INTERVAL_MAP.get(timeframe, "60")
+    html = f"""
+    <div class="tradingview-widget-container" style="height:{height}px;width:100%">
+      <div id="tradingview_chart" style="height:{height}px;width:100%"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+        new TradingView.widget({{
+          "autosize": true,
+          "symbol": "{tv_symbol}",
+          "interval": "{tv_interval}",
+          "timezone": "Etc/UTC",
+          "theme": "dark",
+          "style": "1",
+          "locale": "en",
+          "toolbar_bg": "#0b1220",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "save_image": true,
+          "studies": ["RSI@tv-basicstudies", "MACD@tv-basicstudies", "Volume@tv-basicstudies"],
+          "container_id": "tradingview_chart"
+        }});
+      </script>
+    </div>
+    """
+    components.html(html, height=height)
 
 
 def get_conn():
@@ -220,48 +266,52 @@ def grade_color(g):
 def load_crypto(symbol: str, timeframe: str):
     interval = INTERVAL_MAP[timeframe]
     period = PERIOD_MAP[timeframe]
-    data = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False)
+    data = yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False, group_by="column")
     if data is None or data.empty:
         return pd.DataFrame()
-    data = data.rename(columns=str.lower).reset_index()
-    dt_col = "Datetime" if "Datetime" in data.columns else "Date"
-    dt_col = dt_col.lower()
-    if dt_col not in data.columns:
-        dt_col = data.columns[0]
-    data = data.rename(columns={dt_col: "date"})
-    data["date"] = pd.to_datetime(data["date"])
-    return data[["date", "open", "high", "low", "close", "volume"]].dropna().reset_index(drop=True)
+
+    if isinstance(data.columns, pd.MultiIndex):
+        flat_cols = []
+        for col in data.columns:
+            parts = [str(x) for x in col if x is not None and str(x) != ""]
+            flat_cols.append("_".join(parts).lower())
+        data.columns = flat_cols
+    else:
+        data.columns = [str(c).lower() for c in data.columns]
+
+    data = data.reset_index()
+    data.columns = [str(c).lower() for c in data.columns]
+
+    date_candidates = [c for c in data.columns if c in ["date", "datetime", "index"] or c.startswith("date") or c.startswith("datetime")]
+    if not date_candidates:
+        return pd.DataFrame()
+    date_col = date_candidates[0]
+    data = data.rename(columns={date_col: "date"})
+
+    value_map = {}
+    for base in ["open", "high", "low", "close", "volume"]:
+        matches = [c for c in data.columns if c == base or c.startswith(base + "_")]
+        if matches:
+            value_map[base] = matches[0]
+
+    needed = ["open", "high", "low", "close", "volume"]
+    if not all(k in value_map for k in needed):
+        return pd.DataFrame()
+
+    out = data[["date", value_map["open"], value_map["high"], value_map["low"], value_map["close"], value_map["volume"]]].copy()
+    out.columns = ["date", "open", "high", "low", "close", "volume"]
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    for c in ["open", "high", "low", "close", "volume"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    out = out.dropna().reset_index(drop=True)
+    return out
 
 
-def enrich_mega(
-    df: pd.DataFrame,
-    capital=300.0,
-    max_dd_pct=20.0,
-    ks_daily_pct=4.0,
-    kelly_wr=0.55,
-    kelly_rr=2.0,
-    leverage_scalp=10,
-    leverage_swing=7,
-    leverage_brk=15,
-    atr_len=14,
-    adx_len=14,
-    adx_smooth=14,
-    bb_len=20,
-    bb_mult=2.0,
-    regime_trend_adx=25.0,
-    regime_vol_atr=1.5,
-    rsi_len=14,
-    macd_fast=12,
-    macd_slow=26,
-    macd_sig=9,
-    ema_fast_len=20,
-    ema_slow_len=50,
-    ema_trend_len=200,
-    vol_lookback=20,
-    vol_spike_mult=1.5,
-    swing_len=5,
-    timeframe="1h",
-):
+def enrich_mega(df: pd.DataFrame, capital=300.0, max_dd_pct=20.0, ks_daily_pct=4.0, kelly_wr=0.55, kelly_rr=2.0,
+                leverage_scalp=10, leverage_swing=7, leverage_brk=15, atr_len=14, adx_len=14, adx_smooth=14,
+                bb_len=20, bb_mult=2.0, regime_trend_adx=25.0, regime_vol_atr=1.5, rsi_len=14, macd_fast=12,
+                macd_slow=26, macd_sig=9, ema_fast_len=20, ema_slow_len=50, ema_trend_len=200, vol_lookback=20,
+                vol_spike_mult=1.5, swing_len=5, timeframe='1h'):
     x = df.copy()
     if x.empty:
         return x
@@ -277,9 +327,9 @@ def enrich_mega(
     x["bb_squeeze"] = x["bb_width"] < x["bb_avg_w"] * 0.75
 
     x["regime"] = np.where(
-        x["adx_val"] > regime_trend_adx * 1.3,
-        "TREND",
-        np.where((x["strong_trend"]) & (~x["vol_expand"]), "TREND", np.where(x["vol_expand"], "VOLATILE", "RANGE")),
+        x["adx_val"] > regime_trend_adx * 1.3, "TREND",
+        np.where((x["strong_trend"]) & (~x["vol_expand"]), "TREND",
+                 np.where(x["vol_expand"], "VOLATILE", "RANGE"))
     )
     x["regime_score"] = x["regime"].map({"TREND": 2, "VOLATILE": 1, "RANGE": 0})
 
@@ -326,11 +376,9 @@ def enrich_mega(
     x["bear_count"] = x[["gate1_bear", "gate2_bear", "gate3_bear", "gate5_bear", "gate6_bear"]].sum(axis=1)
     x["is_long"] = x["bull_count"] > x["bear_count"]
     x["is_short"] = x["bear_count"] > x["bull_count"]
-    x["grade"] = np.where(
-        (x["total_gates"] >= 6) & (x["regime_score"] >= 1),
-        "S+",
-        np.where(x["total_gates"] >= 5, "A", np.where(x["total_gates"] >= 4, "B", "SKIP")),
-    )
+    x["grade"] = np.where((x["total_gates"] >= 6) & (x["regime_score"] >= 1), "S+",
+                   np.where(x["total_gates"] >= 5, "A",
+                   np.where(x["total_gates"] >= 4, "B", "SKIP")))
     x["is_actionable"] = x["grade"].isin(["S+", "A"])
 
     tf_seconds = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 3600)
@@ -382,33 +430,15 @@ def fmt_pct(v):
 
 
 def terminal_table(rows):
-    html = "".join([f"<div class='watch-row'><span>{k}</span><span>{v}</span></div>" for k, v in rows])
+    html = ''.join([f"<div class='watch-row'><span>{k}</span><span>{v}</span></div>" for k, v in rows])
     st.markdown(f"<div class='panel'>{html}</div>", unsafe_allow_html=True)
 
 
 def make_main_chart(df, symbol):
-    fig = make_subplots(
-        rows=3,
-        cols=1,
-        shared_xaxes=True,
-        row_heights=[0.58, 0.18, 0.24],
-        vertical_spacing=0.04,
-        subplot_titles=(f"{symbol} Price", "Volume", "MEGA-ENT Momentum"),
-    )
-    fig.add_trace(
-        go.Candlestick(
-            x=df["date"],
-            open=df["open"],
-            high=df["high"],
-            low=df["low"],
-            close=df["close"],
-            increasing_line_color="#22c55e",
-            decreasing_line_color="#ef4444",
-            name="OHLC",
-        ),
-        row=1,
-        col=1,
-    )
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.58, 0.18, 0.24], vertical_spacing=0.04,
+                        subplot_titles=(f"{symbol} Price", "Volume", "MEGA-ENT Momentum"))
+    fig.add_trace(go.Candlestick(x=df["date"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
+                                 increasing_line_color="#22c55e", decreasing_line_color="#ef4444", name="OHLC"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["date"], y=df["ema_fast"], line=dict(color="#22c55e", width=1.2), name="EMA Fast"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["date"], y=df["ema_slow"], line=dict(color="#f59e0b", width=1.2), name="EMA Slow"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["date"], y=df["ema_trend"], line=dict(color="#cbd5e1", width=1.4), name="EMA 200"), row=1, col=1)
@@ -424,42 +454,13 @@ def make_main_chart(df, symbol):
 
     long_df = df[df["fire_long"]]
     short_df = df[df["fire_short"]]
-    fig.add_trace(
-        go.Scatter(
-            x=long_df["date"],
-            y=long_df["low"] * 0.995,
-            mode="markers+text",
-            text=long_df["grade"],
-            textposition="top center",
-            marker=dict(color="#22c55e", size=9, symbol="triangle-up"),
-            name="LONG",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=short_df["date"],
-            y=short_df["high"] * 1.005,
-            mode="markers+text",
-            text=short_df["grade"],
-            textposition="bottom center",
-            marker=dict(color="#ef4444", size=9, symbol="triangle-down"),
-            name="SHORT",
-        ),
-        row=1,
-        col=1,
-    )
+    fig.add_trace(go.Scatter(x=long_df["date"], y=long_df["low"] * 0.995, mode="markers+text", text=long_df["grade"],
+                             textposition="top center", marker=dict(color="#22c55e", size=9, symbol="triangle-up"), name="LONG"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=short_df["date"], y=short_df["high"] * 1.005, mode="markers+text", text=short_df["grade"],
+                             textposition="bottom center", marker=dict(color="#ef4444", size=9, symbol="triangle-down"), name="SHORT"), row=1, col=1)
 
-    fig.update_layout(
-        height=920,
-        paper_bgcolor=THEME["panel"],
-        plot_bgcolor=THEME["panel"],
-        font=dict(color=THEME["text"]),
-        margin=dict(l=8, r=8, t=30, b=8),
-        xaxis_rangeslider_visible=False,
-        legend=dict(orientation="h", y=1.02, x=0.01),
-    )
+    fig.update_layout(height=920, paper_bgcolor=THEME["panel"], plot_bgcolor=THEME["panel"], font=dict(color=THEME["text"]),
+                      margin=dict(l=8, r=8, t=30, b=8), xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.02, x=0.01))
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(showgrid=True, gridcolor=THEME["grid"])
     return fig
@@ -469,13 +470,7 @@ def make_compare_chart(symbol_returns):
     fig = go.Figure()
     for symbol, series in symbol_returns.items():
         fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines", name=symbol))
-    fig.update_layout(
-        height=340,
-        paper_bgcolor=THEME["panel"],
-        plot_bgcolor=THEME["panel"],
-        font=dict(color=THEME["text"]),
-        margin=dict(l=8, r=8, t=24, b=8),
-    )
+    fig.update_layout(height=340, paper_bgcolor=THEME["panel"], plot_bgcolor=THEME["panel"], font=dict(color=THEME["text"]), margin=dict(l=8, r=8, t=24, b=8))
     fig.update_yaxes(ticksuffix="%", showgrid=True, gridcolor=THEME["grid"])
     fig.update_xaxes(showgrid=False)
     return fig
@@ -485,7 +480,6 @@ def login_view():
     st.title("2FEXC V2")
     st.caption("Crypto terminal with login access.")
     left, right = st.columns([1.15, 1])
-
     with left:
         st.markdown(
             """
@@ -501,10 +495,8 @@ def login_view():
             """,
             unsafe_allow_html=True,
         )
-
     with right:
         tabs = st.tabs(["Connexion", "Inscription"])
-
         with tabs[0]:
             st.markdown("<div class='auth-wrap'>", unsafe_allow_html=True)
             login = st.text_input("Username ou email", key="login_user")
@@ -518,7 +510,6 @@ def login_view():
                 else:
                     st.error("Identifiants invalides.")
             st.markdown("</div>", unsafe_allow_html=True)
-
         with tabs[1]:
             st.markdown("<div class='auth-wrap'>", unsafe_allow_html=True)
             username = st.text_input("Username", key="signup_user")
@@ -546,7 +537,6 @@ def login_view():
 def dashboard_view():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
-
     with st.sidebar:
         st.markdown("## 2FEXC V2")
         st.caption(f"Connecté : {st.session_state.user['username']}")
@@ -554,39 +544,23 @@ def dashboard_view():
             st.session_state.authenticated = False
             st.session_state.user = None
             st.rerun()
-
         st.markdown("---")
         symbol = st.selectbox("Symbol", options=list(CRYPTO_UNIVERSE.keys()), index=0)
         timeframe = st.selectbox("Timeframe", options=["15m", "1h", "4h", "1d"], index=1)
         lookback = st.slider("Bars affichées", 80, 500, 220, 20)
-
         st.markdown("---")
         capital = st.number_input("Capital USDT", 50.0, 100000.0, 300.0, step=50.0)
         kelly_wr = st.slider("Kelly Win Rate", 0.10, 0.95, 0.55, 0.01)
         kelly_rr = st.slider("Kelly R:R", 0.5, 5.0, 2.0, 0.1)
         ks_daily_pct = st.slider("Kill Switch %", 0.5, 10.0, 4.0, 0.5)
-
         st.markdown("---")
-        watch = st.multiselect(
-            "Monitor list",
-            options=list(CRYPTO_UNIVERSE.keys()),
-            default=["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD"],
-        )
+        watch = st.multiselect("Monitor list", options=list(CRYPTO_UNIVERSE.keys()), default=["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD"])
 
     raw = load_crypto(symbol, timeframe)
     if raw.empty:
         st.error("Impossible de charger les données pour ce symbole.")
         return
-
-    df = enrich_mega(
-        raw,
-        capital=capital,
-        kelly_wr=kelly_wr,
-        kelly_rr=kelly_rr,
-        ks_daily_pct=ks_daily_pct,
-        timeframe=timeframe,
-    ).tail(lookback).copy()
-
+    df = enrich_mega(raw, capital=capital, kelly_wr=kelly_wr, kelly_rr=kelly_rr, ks_daily_pct=ks_daily_pct, timeframe=timeframe).tail(lookback).copy()
     last = df.iloc[-1]
 
     st.title("2FEXC V2")
@@ -604,7 +578,6 @@ def dashboard_view():
 
     with tabs[0]:
         c1, c2, c3 = st.columns([1.15, 1.8, 1.1])
-
         with c1:
             st.markdown('<div class="terminal-title">Symbol monitor</div>', unsafe_allow_html=True)
             terminal_table([
@@ -621,11 +594,9 @@ def dashboard_view():
                 ("Contracts", fmt_num(last["contracts"], 4)),
                 ("Kill Switch", "ON" if last["kill_switch"] else "OFF"),
             ])
-
         with c2:
-            st.markdown('<div class="terminal-title">Main chart</div>', unsafe_allow_html=True)
-            st.plotly_chart(make_main_chart(df, symbol), use_container_width=True)
-
+            st.markdown('<div class="terminal-title">TradingView chart</div>', unsafe_allow_html=True)
+            render_tradingview_widget(symbol, timeframe, height=760)
         with c3:
             st.markdown('<div class="terminal-title">Execution levels</div>', unsafe_allow_html=True)
             terminal_table([
@@ -645,10 +616,11 @@ def dashboard_view():
 
     with tabs[1]:
         t1, t2 = st.columns([2.1, 1])
-
         with t1:
+            st.markdown('<div class="terminal-title">TradingView main chart</div>', unsafe_allow_html=True)
+            render_tradingview_widget(symbol, timeframe, height=820)
+            st.markdown('<div class="terminal-title">MEGA-ENT overlays and internal engine</div>', unsafe_allow_html=True)
             st.plotly_chart(make_main_chart(df, symbol), use_container_width=True)
-
         with t2:
             st.markdown('<div class="terminal-title">MEGA-ENT detail</div>', unsafe_allow_html=True)
             gate_rows = [
@@ -665,7 +637,6 @@ def dashboard_view():
                 ("Side", last["side"]),
             ]
             terminal_table(gate_rows)
-
             st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
             st.markdown('<div class="terminal-title">Signal tape</div>', unsafe_allow_html=True)
             signal_df = df[df["fire_any"]][["date", "grade", "side", "regime", "total_gates", "entry_price", "sl_price", "tp_price"]].tail(15)
@@ -678,14 +649,7 @@ def dashboard_view():
             temp = load_crypto(sym, timeframe)
             if temp.empty:
                 continue
-            edf = enrich_mega(
-                temp,
-                capital=capital,
-                kelly_wr=kelly_wr,
-                kelly_rr=kelly_rr,
-                ks_daily_pct=ks_daily_pct,
-                timeframe=timeframe,
-            ).tail(250)
+            edf = enrich_mega(temp, capital=capital, kelly_wr=kelly_wr, kelly_rr=kelly_rr, ks_daily_pct=ks_daily_pct, timeframe=timeframe).tail(250)
             r = edf.iloc[-1]
             prev_close = edf.iloc[-2]["close"] if len(edf) > 1 else r["close"]
             screener_rows.append({
@@ -715,14 +679,7 @@ def dashboard_view():
             temp = load_crypto(sym, timeframe)
             if temp.empty:
                 continue
-            edf = enrich_mega(
-                temp,
-                capital=capital,
-                kelly_wr=kelly_wr,
-                kelly_rr=kelly_rr,
-                ks_daily_pct=ks_daily_pct,
-                timeframe=timeframe,
-            ).tail(120)
+            edf = enrich_mega(temp, capital=capital, kelly_wr=kelly_wr, kelly_rr=kelly_rr, ks_daily_pct=ks_daily_pct, timeframe=timeframe).tail(120)
             base = edf["close"].iloc[0]
             returns[sym] = (edf.set_index("date")["close"] / base - 1) * 100
             r = edf.iloc[-1]
@@ -736,7 +693,6 @@ def dashboard_view():
                 "RVOL": round(r["rvol"], 2),
                 "Entry": round(r["entry_price"], 4),
             })
-
         c1, c2 = st.columns([1.6, 1])
         with c1:
             st.markdown('<div class="terminal-title">Relative performance</div>', unsafe_allow_html=True)
