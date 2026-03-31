@@ -258,10 +258,6 @@ def rolling_vwap(df):
     return (cum_pv / cum_vol).fillna(df["close"])
 
 
-def grade_color(g):
-    return {"S+": THEME["green"], "A": "#16a34a", "B": THEME["orange"], "SKIP": THEME["red"]}.get(g, THEME["muted"])
-
-
 @st.cache_data(ttl=600)
 def load_crypto(symbol: str, timeframe: str):
     interval = INTERVAL_MAP[timeframe]
@@ -377,8 +373,8 @@ def enrich_mega(df: pd.DataFrame, capital=300.0, max_dd_pct=20.0, ks_daily_pct=4
     x["is_long"] = x["bull_count"] > x["bear_count"]
     x["is_short"] = x["bear_count"] > x["bull_count"]
     x["grade"] = np.where((x["total_gates"] >= 6) & (x["regime_score"] >= 1), "S+",
-                   np.where(x["total_gates"] >= 5, "A",
-                   np.where(x["total_gates"] >= 4, "B", "SKIP")))
+                    np.where(x["total_gates"] >= 5, "A",
+                    np.where(x["total_gates"] >= 4, "B", "SKIP")))
     x["is_actionable"] = x["grade"].isin(["S+", "A"])
 
     tf_seconds = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 3600)
@@ -403,7 +399,7 @@ def enrich_mega(df: pd.DataFrame, capital=300.0, max_dd_pct=20.0, ks_daily_pct=4
     x["contracts"] = np.where(x["entry_price"] > 0, x["position_usdt"] / x["entry_price"], 0.0)
     x["notional"] = x["position_usdt"] * x["lev"]
 
-    x["daily_open"] = x["close"].shift(1).rolling(24).first() if timeframe in ["1h", "15m"] else x["open"]
+    x["daily_open"] = x["open"].shift(24) if timeframe in ["1h", "15m"] else x["open"]
     x["daily_open"] = x["daily_open"].fillna(x["open"])
     x["daily_chg"] = np.where(x["daily_open"] > 0, (x["close"] - x["daily_open"]) / x["daily_open"] * 100, 0.0)
     x["kill_switch"] = x["daily_chg"] < -ks_daily_pct
@@ -666,7 +662,6 @@ def dashboard_view():
                 "Signal": bool(r["fire_any"]),
             })
             progress.progress((i + 1) / len(CRYPTO_UNIVERSE), text=f"Scanning {sym}...")
-
         progress.empty()
         screener_df = pd.DataFrame(screener_rows).sort_values(["Signal", "Gates", "RVOL"], ascending=[False, False, False])
         st.markdown('<div class="terminal-title">Crypto screener</div>', unsafe_allow_html=True)
