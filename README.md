@@ -1,39 +1,25 @@
-# 2FEXC
+# 2FEXC V2
 
-2FEXC est une application Streamlit de type terminal financier avec accès protégé.
+2FEXC V2 est une app Streamlit orientée crypto pour trading manuel, avec login, inscription, dashboard dense, screener crypto et intégration Python du système MEGA-ENTONNOIR.
 
-## Fonctionnalités
-- Interface sombre inspirée d'un terminal de marché
-- Connexion utilisateur
-- Inscription avec code d'invitation
-- Stockage local des utilisateurs dans SQLite
-- Mot de passe hashé
-- Session utilisateur et logout
-- Watchlist, graphiques Plotly, news simulées
+## Modules
+- Login / Signup / Logout
+- Monitor crypto multi-symboles
+- Chart & Signals avec candlesticks, volume, RSI, MACD, EMA, VWAP
+- Screener crypto
+- Cross-asset monitor
+- Signal board basé sur MEGA-ENTONNOIR
 
-## Structure
-- `app.py` : application principale
-- `data/users.db` : base SQLite créée automatiquement au premier lancement
-- `.streamlit/config.toml` : thème sombre
+## Données
+- Données de marché via `yfinance`
+- Univers crypto initial : BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, LINK, MATIC
 
-## Lancement local
+## Lancer
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Déploiement Streamlit Community Cloud
-1. Pousse le repo sur GitHub.
-2. Déploie le repo sur Streamlit Community Cloud.
-3. Choisis `app.py` comme fichier principal.
-
-## Identifiants et sécurité
-- Les comptes sont créés via le formulaire d'inscription.
-- Le code d'invitation par défaut est `2FEXC2026`.
-- Les mots de passe sont hashés avant stockage.
-- Pour une vraie production multi-utilisateur, prévois PostgreSQL ou Supabase.
-
-## Limites
-- SQLite convient pour une V1 ou un petit volume.
-- Les données marché affichées sont simulées.
-- Cette base n'est pas un service d'authentification enterprise.
+## Note
+- Le script Pine original n'est pas exécuté directement dans Streamlit ; il est réimplémenté en Python pour reproduire la logique de signal.
+- SQLite est pratique pour V1/V2 locale mais pas idéal pour une prod multi-utilisateur durable.
